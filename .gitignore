@@ -8,3 +8,13 @@ checkpoints_smoke/
 wheels/
 *.part
 .DS_Store
+
+# Dataset binaries never go in git: the full store is ~8.7 GB and the raw
+# archives ~25 GB, both far past GitHub's 1 GB free LFS quota -- and `git lfs
+# pull` needs internet, which Snowflake does not have. Code ships by git,
+# data ships by Snowflake stage (btcpred.data.stage). The 3-day smoke sample
+# lives in data/sample/bars_3d.npz as an ordinary 2.4 MB blob.
+data/bars_1s/
+data/raw/
+dist/
+artifacts/

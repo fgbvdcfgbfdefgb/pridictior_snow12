@@ -263,6 +263,95 @@ def test_hybrid_basis_rebases_onto_the_training_instrument():
     )
 
 
+def _tiny_store(root: Path, n: int = 500):
+    import json as _json
+    root.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(3)
+    base = 8_000_000 + np.cumsum(rng.integers(-50, 51, n))
+    p = np.stack([base, base + 20, base - 20, base], 1).astype(np.int64)
+    f = rng.random((n, 4)).astype(np.float32)
+    np.memmap(root / "prices.i64", np.int64, "w+", shape=(n, 4))[:] = p
+    np.memmap(root / "flows.f32", np.float32, "w+", shape=(n, 4))[:] = f
+    (root / "meta.json").write_text(_json.dumps(
+        {"symbol": "T", "start_ts": 0, "n_seconds": n, "price_scale": 100}))
+    return p, f
+
+
+def test_verify_detects_lfs_pointers_not_mmap_crash():
+    """An LFS stub must produce an actionable error, not a numpy mmap error."""
+    import tempfile
+    from btcpred.data.verify import DatasetError, check
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d) / "bars"
+        _tiny_store(root)
+        (root / "prices.i64").write_text(
+            "version https://git-lfs.github.com/spec/v1\n"
+            "oid sha256:" + "0" * 64 + "\nsize 16000\n")
+        try:
+            check(root)
+            raise AssertionError("pointer stub was not detected")
+        except DatasetError as e:
+            msg = str(e)
+            assert "LFS POINTER" in msg
+            assert "git lfs pull" in msg
+            assert "Snowflake" in msg, "offline path not explained"
+
+
+def test_verify_detects_truncated_files():
+    import tempfile
+    from btcpred.data.verify import DatasetError, check
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d) / "bars"
+        _tiny_store(root)
+        with open(root / "flows.f32", "r+b") as fh:
+            fh.truncate(100)
+        try:
+            check(root)
+            raise AssertionError("truncation not detected")
+        except DatasetError as e:
+            assert "wrong size" in str(e)
+
+
+def test_sample_npz_roundtrip_is_lossless():
+    import tempfile
+    from btcpred.data.sample import compress, expand
+
+    with tempfile.TemporaryDirectory() as d:
+        root, out = Path(d) / "bars", Path(d) / "restored"
+        p, f = _tiny_store(root)
+        compress(root, Path(d) / "s.npz")
+        expand(Path(d) / "s.npz", out)
+        p2 = np.asarray(np.memmap(out / "prices.i64", np.int64, "r", shape=p.shape))
+        f2 = np.asarray(np.memmap(out / "flows.f32", np.float32, "r", shape=f.shape))
+        assert np.array_equal(p, p2), "delta encoding lost price information"
+        assert np.array_equal(f, f2)
+
+
+def test_stage_pack_unpack_roundtrip_and_corruption_detection():
+    import tempfile
+    from btcpred.data.stage import pack, unpack
+
+    with tempfile.TemporaryDirectory() as d:
+        root, dist, out = Path(d) / "bars", Path(d) / "dist", Path(d) / "out"
+        p, _ = _tiny_store(root)
+        pack(root, dist, chunk_bytes=4096)          # force many chunks
+        unpack(dist, out, keep_chunks=True)
+        p2 = np.asarray(np.memmap(out / "prices.i64", np.int64, "r", shape=p.shape))
+        assert np.array_equal(p, p2)
+
+        victim = sorted(dist.glob("prices.i64.*"))[0]
+        b = bytearray(victim.read_bytes())
+        b[0] ^= 0xFF
+        victim.write_bytes(bytes(b))
+        try:
+            unpack(dist, Path(d) / "out2")
+            raise AssertionError("corrupted chunk was not detected")
+        except ValueError as e:
+            assert "sha256 mismatch" in str(e)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

@@ -60,6 +60,12 @@ class BarStore:
 
     def __init__(self, root: str | Path):
         self.root = Path(root)
+        # Fail with a message that names the cause. Without this, an LFS
+        # pointer stub surfaces as "ValueError: mmap length is greater than
+        # file size", which points at numpy rather than at the real problem.
+        from .verify import check
+
+        check(self.root)
         self.meta = json.loads((self.root / "meta.json").read_text())
         self.n = int(self.meta["n_seconds"])
         self.start_ts = int(self.meta["start_ts"])

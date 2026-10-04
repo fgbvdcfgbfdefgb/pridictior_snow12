@@ -100,22 +100,81 @@ points. Reported independently of accuracy, and a gate during selection.
 ## Quick start
 
 ```bash
-# Install git-lfs BEFORE cloning. Without it the dataset arrives as 132-byte
-# pointer stubs and BarStore dies with:
-#   ValueError: mmap length is greater than file size
-# (already cloned? just run `git lfs install && git lfs pull` to recover)
-git lfs install
-
 git clone https://github.com/fgbvdcfgbfdefgb/pridictior_snow12.git
 cd pridictior_snow12
-git lfs pull                             # 1s bar store + raw archives
 
 pip install -r requirements.txt
 export PYTHONPATH=src
 
 python -m btcpred.utils.hardware          # what have we got?
-python tests/test_pipeline.py             # 14 correctness tests
+python -m btcpred.data.sample --expand    # 3-day smoke sample, no network
+python -m btcpred.data.verify             # dataset doctor
+python tests/test_pipeline.py             # 18 correctness tests
 ```
+
+No Git LFS, no network, no stage needed for any of the above.
+
+### Getting the dataset into Snowflake
+
+**The dataset does not travel in git.** This was a design error in the first
+version of this repo and it is worth stating plainly, because the failure mode
+is ugly:
+
+| | |
+|---|---|
+| Full bar store | **8.7 GB** (`prices.i64` 5.8 GB + `flows.f32` 2.9 GB) |
+| Raw archives | **25 GB** |
+| GitHub free LFS quota | **1 GB** storage / 1 GB bandwidth per month |
+| `git lfs pull` | a **network call** — Snowflake has no egress |
+
+So LFS fails this project twice over: the data does not fit, and the pull
+cannot happen where it is needed. If you clone without LFS resolving, the
+binaries arrive as 132-byte pointer stubs and numpy reports
+
+```
+ValueError: mmap length is greater than file size
+```
+
+which blames the wrong thing entirely. `BarStore` now refuses to open such a
+store and prints what is actually wrong and how to fix it, and
+`python -m btcpred.data.verify` does the same as a standalone check.
+
+**Code ships by git. Data ships by Snowflake stage.**
+
+```bash
+# 1. on a networked machine (6-10 h, ~60 GB disk)
+./scripts/fetch_data.sh
+
+# 2. split into checksummed chunks (resumable, corruption-detecting)
+python -m btcpred.data.stage --pack --bars data/bars_1s --out dist/
+
+# 3. push to a stage
+snowsql -q "CREATE STAGE IF NOT EXISTS BTCPRED_DATA"
+snowsql -q "PUT file://dist/* @BTCPRED_DATA AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
+
+# 4. inside Snowflake — no internet required
+#    GET @BTCPRED_DATA file:///tmp/dist/;
+python -m btcpred.data.stage --unpack --src /tmp/dist --bars data/bars_1s
+```
+
+Every chunk carries a SHA-256 and so does each whole file, verified on
+reassembly — a truncated or corrupted transfer fails loudly instead of
+becoming an inexplicable training bug.
+
+### The 3-day smoke sample
+
+`data/sample/bars_3d.npz` (**2.4 MB**, an ordinary git blob — no LFS) holds
+3 days of real BTCUSDT 1-second bars, delta-encoded and compressed from
+12.4 MB. It makes `git clone` alone sufficient to run the tests, the
+simulator and a smoke training job, offline.
+
+```bash
+python -m btcpred.data.sample --expand      # -> data/bars_1s
+```
+
+It is **not** a training set: 3 days against a 12 h warm-up and a 21-day
+val/test reservation. The notebook and the doctor both say so in large letters
+rather than letting you train on it by accident.
 
 ### 1. Build the dataset (networked machine)
 
@@ -281,6 +340,9 @@ explanatory callout rather than a traceback. Switch *Data source* to
 src/btcpred/
   data/download_binance.py   resumable, checksum-verified archive fetcher
   data/resample.py           aggTrades → gap-free 1 s bar store (memmap)
+  data/verify.py             dataset doctor: LFS stubs, truncation, size
+  data/stage.py              chunked + checksummed Snowflake stage transport
+  data/sample.py             2.4 MB committed 3-day smoke sample
   data/features.py           3-lane multi-resolution encoder, scale-free
   data/dataset.py            streaming time-ordered sampler, rank sharding
   sim/simulator.py           replay-as-live; enforces the information boundary
@@ -297,7 +359,7 @@ notebooks/molab_live.py        marimo live dashboard (CMC style)
 notebooks/snowflake_train.ipynb offline training notebook
 configs/a10x4.json             4 × A10 production config
 configs/smoke_cpu.json         tiny CPU config for correctness runs
-tests/test_pipeline.py         14 tests
+tests/test_pipeline.py         18 tests
 ```
 
 ## The simulator's information boundary
@@ -323,7 +385,7 @@ Smoke-trained on 3 days of real BTCUSDT (2026-10-01 → 10-03, 259 198 seconds,
   `biquote` 96.8 % synthetic (correctly flagged), `hybrid` 0 % synthetic with
   live basis tracking and no duplicate bars at the warm-up seam
 - `notebooks/molab_live.py` executes headless with zero cell errors
-- 14/14 tests pass
+- 18/18 tests pass
 
 Not verified here (no GPU in the build environment): multi-GPU DDP throughput
 and bf16 numerics. The DDP path is standard `torchrun`, but budget time for a
