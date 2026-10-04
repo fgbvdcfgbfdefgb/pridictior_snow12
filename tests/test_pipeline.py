@@ -7,6 +7,7 @@ Run:  PYTHONPATH=src python -m pytest tests/ -v
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -350,6 +351,37 @@ def test_stage_pack_unpack_roundtrip_and_corruption_detection():
             raise AssertionError("corrupted chunk was not detected")
         except ValueError as e:
             assert "sha256 mismatch" in str(e)
+
+
+def test_streaming_build_matches_in_ram_resampler():
+    """build.py must be a drop-in for resample.py, bit for bit.
+
+    The streaming builder folds one archive at a time with month-sized
+    buffers; the original holds the whole timeline in RAM. They must agree
+    exactly, including gap forward-fill across block boundaries.
+    """
+    import subprocess, sys, tempfile, hashlib
+    repo = Path(__file__).resolve().parents[1]
+    raw = repo / "data" / "raw"
+    ref = repo / "data" / "bars_1s"
+    if not raw.exists() or not any(raw.rglob("*.zip")) or not (ref / "meta.json").exists():
+        print("    (skipped: sample archives not present)")
+        return
+
+    with tempfile.TemporaryDirectory(dir=str(repo)) as d:
+        out = Path(d) / "bars"
+        env = {**os.environ, "PYTHONPATH": str(repo / "src")}
+        r = subprocess.run(
+            [sys.executable, "-m", "btcpred.data.build", "--start", "2026-10",
+             "--end", "2026-10", "--raw", str(raw), "--out", str(out),
+             "--no-verify"],
+            capture_output=True, text=True, env=env, cwd=repo)
+        assert r.returncode == 0, r.stdout + r.stderr
+
+        for name in ("prices.i64", "flows.f32"):
+            a = hashlib.sha256((ref / name).read_bytes()).hexdigest()
+            b = hashlib.sha256((out / name).read_bytes()).hexdigest()
+            assert a == b, f"{name}: streaming build differs from resample.py"
 
 
 if __name__ == "__main__":

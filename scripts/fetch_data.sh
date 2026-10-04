@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Build the full 1-second dataset. Run on a NETWORKED machine, then commit
-# the result (Git LFS) so Snowflake can train with no internet.
+# Build the full 1-second dataset, streaming and resumable.
 #
-#   ~25 GB of downloads, 6-10 h. Fully resumable: re-run after any interruption.
-#   Needs ~60 GB free disk (25 GB archives + ~9 GB bar store + headroom).
+# Folds one archive at a time: download -> accumulate -> write -> purge.
+#   peak RAM   ~200 MB   (not 11.7 GB)
+#   peak disk  ~10 GB    (not ~34 GB)   with --purge
+#   time       6-10 h, fully resumable - just re-run after any interruption
+#
+# Drop --purge if you want to keep the raw archives (needs ~25 GB more).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PYTHONPATH=src
@@ -11,13 +14,20 @@ export PYTHONPATH=src
 START="${START:-2020-01}"
 END="${END:-$(date -u +%Y-%m)}"
 SYMBOL="${SYMBOL:-BTCUSDT}"
+PURGE="${PURGE:---purge}"
 
-echo ">> downloading ${SYMBOL} aggTrades ${START} .. ${END}"
-python -m btcpred.data.download_binance \
-    --symbol "$SYMBOL" --start "$START" --end "$END" --out data/raw
+echo ">> plan"
+python -m btcpred.data.build --symbol "$SYMBOL" --start "$START" --end "$END" --dry-run
 
-echo ">> resampling to a gap-free 1-second grid"
-python -m btcpred.data.resample --raw data/raw --out data/bars_1s
+echo ">> building (resumable; safe to re-run)"
+python -m btcpred.data.build \
+    --symbol "$SYMBOL" --start "$START" --end "$END" \
+    --raw data/raw --out data/bars_1s $PURGE --keep-going
 
-echo ">> done"
-du -sh data/raw data/bars_1s
+echo ">> verifying"
+python -m btcpred.data.verify --bars data/bars_1s
+
+echo
+echo ">> next: get it into Snowflake (no internet needed there)"
+echo "   python -m btcpred.data.stage --pack --bars data/bars_1s --out dist/"
+echo "   snowsql -q \"PUT file://dist/* @BTCPRED_DATA AUTO_COMPRESS=FALSE OVERWRITE=TRUE\""

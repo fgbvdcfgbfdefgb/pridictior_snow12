@@ -109,7 +109,7 @@ export PYTHONPATH=src
 python -m btcpred.utils.hardware          # what have we got?
 python -m btcpred.data.sample --expand    # 3-day smoke sample, no network
 python -m btcpred.data.verify             # dataset doctor
-python tests/test_pipeline.py             # 18 correctness tests
+python tests/test_pipeline.py             # 19 correctness tests
 ```
 
 No Git LFS, no network, no stage needed for any of the above.
@@ -179,8 +179,20 @@ rather than letting you train on it by accident.
 ### 1. Build the dataset (networked machine)
 
 ```bash
-./scripts/fetch_data.sh                   # 2020-01 → today
+./scripts/fetch_data.sh                   # 2020-01 → today, resumable
 ```
+
+Streams one archive at a time — download, fold in, write, purge — so the
+whole 2 100-day history builds without ever holding it in memory:
+
+| | naive (`resample.py`) | streaming (`build.py`) |
+|---|---|---|
+| Peak RAM | **11.7 GB** | **~200 MB** |
+| Peak disk | ~34 GB | **~10 GB** (with `--purge`) |
+| Interrupted run | starts over | **resumes from journal** |
+
+Verified byte-identical to `resample.py` on the sample, including after a
+simulated interruption (`test_streaming_build_matches_in_ram_resampler`).
 
 Pulls `aggTrades` from `data.binance.vision` — free, keyless, and the only
 bulk source with true sub-second resolution back to 2020 — then resamples to a
@@ -340,6 +352,7 @@ explanatory callout rather than a traceback. Switch *Data source* to
 src/btcpred/
   data/download_binance.py   resumable, checksum-verified archive fetcher
   data/resample.py           aggTrades → gap-free 1 s bar store (memmap)
+  data/build.py              streaming, resumable full-dataset builder
   data/verify.py             dataset doctor: LFS stubs, truncation, size
   data/stage.py              chunked + checksummed Snowflake stage transport
   data/sample.py             2.4 MB committed 3-day smoke sample
@@ -359,7 +372,7 @@ notebooks/molab_live.py        marimo live dashboard (CMC style)
 notebooks/snowflake_train.ipynb offline training notebook
 configs/a10x4.json             4 × A10 production config
 configs/smoke_cpu.json         tiny CPU config for correctness runs
-tests/test_pipeline.py         18 tests
+tests/test_pipeline.py         19 tests
 ```
 
 ## The simulator's information boundary
@@ -385,7 +398,7 @@ Smoke-trained on 3 days of real BTCUSDT (2026-10-01 → 10-03, 259 198 seconds,
   `biquote` 96.8 % synthetic (correctly flagged), `hybrid` 0 % synthetic with
   live basis tracking and no duplicate bars at the warm-up seam
 - `notebooks/molab_live.py` executes headless with zero cell errors
-- 18/18 tests pass
+- 19/19 tests pass
 
 Not verified here (no GPU in the build environment): multi-GPU DDP throughput
 and bf16 numerics. The DDP path is standard `torchrun`, but budget time for a
