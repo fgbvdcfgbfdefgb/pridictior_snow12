@@ -44,12 +44,14 @@ def _(mo):
         value=os.environ.get("BTCPRED_CKPT", "checkpoints"),
         label="Checkpoint directory", full_width=True,
     )
-    source = mo.ui.radio(
+    source = mo.ui.dropdown(
         options={
-            "Live Binance feed": "live",
+            "Hybrid — Binance 1s warm-up + biquote.io live (recommended)": "hybrid",
+            "biquote.io only — live quotes, synthetic warm-up": "biquote",
+            "Binance only — true 1s throughout": "binance",
             "Replay recorded history (offline)": "sim",
         },
-        value="Live Binance feed",
+        value="Hybrid — Binance 1s warm-up + biquote.io live (recommended)",
         label="Data source",
     )
     device = mo.ui.dropdown(
@@ -114,106 +116,35 @@ def _(Path, alpha, ckpt_dir, device, mo):
 
 
 @app.cell
-def _(mo, np, runner, source):
-    import time
-    from collections import deque
+def _(mo, runner, source):
+    from btcpred.live.feeds import make_feed
 
-    import requests
-
-    # api.binance.com returns HTTP 451 from several regions (India included,
-    # and some cloud ranges). data-api.binance.vision is the public, keyless,
-    # un-geo-blocked market-data mirror and serves identical klines, so it is
-    # tried FIRST and the main host is only a fallback.
-    BINANCE_HOSTS = [
-        "https://data-api.binance.vision/api/v3",
-        "https://api-gcp.binance.com/api/v3",
-        "https://api.binance.com/api/v3",
-    ]
-    SYMBOL = "BTCUSDT"
-
-    def binance_get(path: str, params: dict, timeout: int = 20):
-        """GET from the first Binance host that is reachable from here."""
-        errs = []
-        for host in BINANCE_HOSTS:
-            try:
-                r = requests.get(f"{host}{path}", params=params, timeout=timeout)
-                if r.status_code == 451:
-                    errs.append(f"{host}: 451 geo-restricted")
-                    continue
-                r.raise_for_status()
-                return r.json()
-            except requests.RequestException as e:
-                errs.append(f"{host}: {e}")
-        raise RuntimeError("all Binance hosts failed -> " + "; ".join(errs))
-
-    def fetch_warmup_1s(seconds: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Pull `seconds` of 1-second klines, paginating backwards (1000/req)."""
-        end = int(time.time() * 1000)
-        ts, close, vol, trades = [], [], [], []
-        remaining = seconds
-        while remaining > 0:
-            n = min(1000, remaining)
-            rows = binance_get("/klines", {"symbol": SYMBOL, "interval": "1s",
-                                           "endTime": end, "limit": n})
-            if not rows:
-                break
-            ts = [int(x[0]) // 1000 for x in rows] + ts
-            close = [float(x[4]) for x in rows] + close
-            vol = [float(x[5]) for x in rows] + vol
-            trades = [float(x[8]) for x in rows] + trades
-            end = int(rows[0][0]) - 1
-            remaining -= len(rows)
-        return (np.array(ts, np.int64), np.array(close, np.float64),
-                np.array(vol, np.float64), np.array(trades, np.float64))
-
-    def regrid(ts, close, vol, trades, need):
-        """Binance omits empty seconds; rebuild a contiguous 1 s grid."""
-        if len(ts) == 0:
-            raise RuntimeError("no data returned from Binance")
-        full = np.arange(ts[-1] - need + 1, ts[-1] + 1, dtype=np.int64)
-        idx = np.searchsorted(ts, full).clip(0, len(ts) - 1)
-        c = close[idx]
-        exact = ts[idx] == full
-        v = np.where(exact, vol[idx], 0.0)
-        n = np.where(exact, trades[idx], 0.0)
-        return full, c, v, n
-
-    warm_status = mo.md("Model not loaded — nothing to warm up.").callout("warn")
     feed = None
+    hist0 = None
+    warm_status = mo.md("Model not loaded — nothing to warm up.").callout("warn")
 
-    if runner is not None and source.value == "live":
+    if runner is not None and source.value != "sim":
         try:
-            _ts, _c, _v, _n = fetch_warmup_1s(runner.warmup + 120)
-            _ts, _c, _v, _n = regrid(_ts, _c, _v, _n, runner.warmup)
-            feed = {"ts": deque(_ts.tolist(), maxlen=runner.warmup + 7200),
-                    "close": deque(_c.tolist(), maxlen=runner.warmup + 7200),
-                    "vol": deque(_v.tolist(), maxlen=runner.warmup + 7200),
-                    "trades": deque(_n.tolist(), maxlen=runner.warmup + 7200)}
+            feed = make_feed(source.value)
+            hist0 = feed.warmup(runner.warmup)
+            _notes = "\n".join(f"- {n}" for n in hist0.notes)
+            _synth = hist0.synthetic_fraction
+            _kind = "danger" if _synth > 0.5 else ("warn" if _synth > 0.05 else "success")
             warm_status = mo.md(
-                f"**Warm-up complete** — {len(_c):,} seconds "
-                f"({len(_c)/3600:.1f} h) of BTCUSDT loaded, "
-                f"last price **${_c[-1]:,.2f}**."
-            ).callout("success")
+                f"**Warm-up complete — `{hist0.source}`**\n\n"
+                f"{len(hist0.ts):,} seconds ({len(hist0.ts)/3600:.1f} h), "
+                f"last **${hist0.close[-1]:,.2f}**, "
+                f"**{_synth*100:.1f}% synthetic**\n\n{_notes}"
+            ).callout(_kind)
         except Exception as exc:  # noqa: BLE001
+            feed = None
             warm_status = mo.md(
-                f"**Live warm-up failed** (no internet, or Binance is "
-                f"geo-blocked here).\n\n```\n{exc}\n```\n\n"
-                "Switch the data source to *Replay recorded history*."
+                f"**Feed `{source.value}` failed**\n\n```\n{exc}\n```\n\n"
+                "Try another source, or switch to *Replay recorded history*."
             ).callout("danger")
 
     warm_status
-    return (
-        BINANCE_HOSTS,
-        binance_get,
-        SYMBOL,
-        deque,
-        feed,
-        fetch_warmup_1s,
-        regrid,
-        requests,
-        time,
-        warm_status,
-    )
+    return feed, hist0, make_feed, warm_status
 
 
 @app.cell
@@ -265,54 +196,56 @@ def _(mo):
 
 @app.cell
 def _(
-    binance_get,
     context_from_closes,
     feed,
-    get_hist,
     get_track,
+    hist0,
     np,
     refresher,
-    requests,
     runner,
+    running,
     set_fc,
     set_hist,
     set_track,
     sim,
     source,
-    time,
-    running,
 ):
+    from collections import deque
+
     refresher  # dependency: re-run on every tick
 
     tick_error = None
     if runner is not None and running.value:
         try:
-            if source.value == "live" and feed is not None:
-                klines = binance_get("/klines", {"symbol": "BTCUSDT",
-                                                 "interval": "1s", "limit": 60},
-                                     timeout=10)
-                last_ts = feed["ts"][-1]
-                for row in klines:
-                    t = int(row[0]) // 1000
-                    if t <= last_ts:
-                        continue
-                    # Fill any seconds Binance skipped (no trades printed).
-                    while feed["ts"][-1] + 1 < t:
-                        feed["ts"].append(feed["ts"][-1] + 1)
-                        feed["close"].append(feed["close"][-1])
-                        feed["vol"].append(0.0)
-                        feed["trades"].append(0.0)
-                    feed["ts"].append(t)
-                    feed["close"].append(float(row[4]))
-                    feed["vol"].append(float(row[5]))
-                    feed["trades"].append(float(row[8]))
+            if source.value != "sim" and feed is not None:
+                if not hasattr(feed, "_buf"):
+                    feed._buf = {
+                        "ts": deque(hist0.ts.tolist(), maxlen=runner.warmup + 7200),
+                        "close": deque(hist0.close.tolist(), maxlen=runner.warmup + 7200),
+                        "vol": deque(hist0.volume.tolist(), maxlen=runner.warmup + 7200),
+                        "trades": deque(hist0.trades.tolist(), maxlen=runner.warmup + 7200),
+                    }
+                buf = feed._buf
+                for sec, pxv, volv, trdv in feed.poll():
+                    # Fill any seconds the feed skipped, so the 1 s grid the
+                    # model expects stays contiguous.
+                    while buf["ts"][-1] + 1 < sec:
+                        buf["ts"].append(buf["ts"][-1] + 1)
+                        buf["close"].append(buf["close"][-1])
+                        buf["vol"].append(0.0)
+                        buf["trades"].append(0.0)
+                    if sec > buf["ts"][-1]:
+                        buf["ts"].append(sec)
+                        buf["close"].append(pxv)
+                        buf["vol"].append(volv)
+                        buf["trades"].append(trdv)
 
-                closes = np.fromiter(feed["close"], np.float64)
-                vols = np.fromiter(feed["vol"], np.float64)
-                trs = np.fromiter(feed["trades"], np.float64)
-                ctx, anchor = context_from_closes(closes, vols, trs, runner.lanes)
-                now_ts = int(feed["ts"][-1])
-                hist_ts = np.fromiter(feed["ts"], np.int64)
+                closes = np.fromiter(buf["close"], np.float64)
+                ctx, anchor = context_from_closes(
+                    closes, np.fromiter(buf["vol"], np.float64),
+                    np.fromiter(buf["trades"], np.float64), runner.lanes)
+                now_ts = int(buf["ts"][-1])
+                hist_ts = np.fromiter(buf["ts"], np.int64)
                 hist_px = closes
 
             elif sim is not None:
@@ -327,8 +260,6 @@ def _(
             set_fc(fc)
             set_hist(list(zip(hist_ts[-28800:].tolist(), hist_px[-28800:].tolist())))
 
-            # Retain forecasts so realised error can be scored once the
-            # 25-minute horizon actually elapses.
             tr = get_track()[-900:]
             tr.append((now_ts, float(fc.median[-1]), float(anchor)))
             set_track(tr)
@@ -337,7 +268,8 @@ def _(
             tick_error = f"{type(exc).__name__}: {exc}"
 
     tick_error
-    return anchor, ctx, fc, hist_px, hist_ts, klines, now_ts, tick_error, tr
+    return (anchor, buf, closes, ctx, deque, fc, hist_px, hist_ts, now_ts,
+            pxv, sec, tick_error, tr, trdv, volv)
 
 
 @app.cell

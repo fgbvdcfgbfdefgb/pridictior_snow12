@@ -108,7 +108,7 @@ pip install -r requirements.txt
 export PYTHONPATH=src
 
 python -m btcpred.utils.hardware          # what have we got?
-python tests/test_pipeline.py             # 11 correctness tests
+python tests/test_pipeline.py             # 14 correctness tests
 ```
 
 ### 1. Build the dataset (networked machine)
@@ -138,9 +138,9 @@ forward-filled on price, zero-filled on flow, and flagged to the model via a
 dedicated `gap_flag` feature.
 
 > **Note on `api.binance.com`:** it returns **HTTP 451** from India and several
-> cloud regions. Both the downloader and the live notebook use
-> `data-api.binance.vision` (the public mirror) first and fall back to other
-> hosts. No API key is needed anywhere in this repo.
+> cloud regions. Everything here uses `data-api.binance.vision` (the public
+> mirror) first and falls back to other hosts. No API key is needed anywhere
+> in this repo.
 
 ### 2. Train (Snowflake, offline)
 
@@ -205,6 +205,53 @@ price line with area fill, dotted `#3861FB` forecast with an 80 % band, live
 price header, and a realised-error panel that scores matured forecasts against
 a random walk once 25 minutes have actually elapsed.
 
+#### Live data sources
+
+Selectable in the notebook (`src/btcpred/live/feeds.py`):
+
+| Mode | Warm-up (12 h) | Live ticks | Use when |
+|---|---|---|---|
+| **`hybrid`** *(default)* | Binance mirror, true 1 s | **biquote.io** | Normal operation |
+| `biquote` | biquote OHLC, **~97 % synthetic** | biquote.io | Binance unreachable |
+| `binance` | Binance mirror, true 1 s | Binance mirror | Binance reachable |
+| `sim` | — | recorded replay | Offline / demo |
+
+**What biquote.io actually provides** (measured 2026-10-04, not assumed):
+
+```
+GET /api/BTCUSD           latest tick: bid, ask, mid, spread   ✓ excellent
+GET /api/BTCUSD/history   capped at 100 ticks (~1.8 min) — `limit` is ignored
+GET /api/BTCUSD/ohlc      intervals 1m 5m 15m 30m 1h 4h 1d — NO 1s
+                          rolling windows, NO pagination:
+                            1m → 301 bars (5 h)
+                            5m → 289 bars (24 h)
+                           15m → 193 bars (48 h)
+```
+
+It is a genuinely good live source — free, no key, sub-100 ms, and **not
+geo-blocked**, which `api.binance.com` is from India. But four properties
+decide the architecture:
+
+1. **No 1-second history, and none deeper than 5 h at 1 m.** The model needs
+   43 200 one-second bars for its 12 h context; biquote can supply at most 720
+   one-minute bars over that span. Measured: a biquote-only warm-up is
+   **96.8 % synthetic**. The notebook reports this figure in red rather than
+   hiding it.
+2. **No volume.** `volume` is 0 on every tick — it is an MT5 CFD feed, not an
+   exchange tape. Only `tickVolume` exists, in OHLC bars. The volume and
+   taker-buy-imbalance channels get zero-filled, which is off-distribution.
+3. **~0.5 new quotes/second**, so roughly every other second repeats.
+4. **Different instrument.** biquote `BTCUSD` is an MT5 broker CFD; the model
+   trains on Binance `BTCUSDT` spot. Measured basis **−6.5 USD (−0.8 bp),
+   sd 3.2**, and it drifts. `HybridFeed` tracks it with an EMA (re-anchoring
+   against Binance every 60 s) and subtracts it, so the live series stays on
+   the price level the model was trained on. Splicing raw would hand the model
+   a step change it reads as a real move.
+
+Synthetic warm-up seconds are **held, never interpolated** — a held price is an
+honest "no new information", whereas a smooth ramp manufactures microstructure
+and leaks the next sample backwards in time. Two tests enforce this.
+
 **On the "one chart that updates, not a new chart each tick" requirement** —
 this notebook cannot stack charts, structurally:
 
@@ -237,13 +284,14 @@ src/btcpred/
   train/reward.py            pinball + consistency + smoothness + P&L reward
   train/train_ddp.py         DDP trainer, no epochs
   train/select_best.py       walk-forward eval, gated selection
+  live/feeds.py              biquote.io / Binance / hybrid live feeds
   infer/runner.py            live runner with revision smoothing
   utils/hardware.py          compute discovery + automatic model sizing
 notebooks/molab_live.py        marimo live dashboard (CMC style)
 notebooks/snowflake_train.ipynb offline training notebook
 configs/a10x4.json             4 × A10 production config
 configs/smoke_cpu.json         tiny CPU config for correctness runs
-tests/test_pipeline.py         11 tests
+tests/test_pipeline.py         14 tests
 ```
 
 ## The simulator's information boundary
@@ -263,10 +311,13 @@ Smoke-trained on 3 days of real BTCUSDT (2026-10-01 → 10-03, 259 198 seconds,
 
 - all three variants train; pinball 43.9 → 0.2, consistency 9.78 → 0.01
 - walk-forward evaluation, gated selection, and `best_predictor.pt` export run
-- live path verified end-to-end against real Binance data: 6 144 s warm-up →
-  forecast with an 80 % band, mean revision **0.035 bp/s**
+- live path verified end-to-end against real data: 6 144 s warm-up → forecast
+  with an 80 % band, mean revision **0.035 bp/s**
+- all three live feeds exercised against the real APIs: `binance` 0 % synthetic,
+  `biquote` 96.8 % synthetic (correctly flagged), `hybrid` 0 % synthetic with
+  live basis tracking and no duplicate bars at the warm-up seam
 - `notebooks/molab_live.py` executes headless with zero cell errors
-- 11/11 tests pass
+- 14/14 tests pass
 
 Not verified here (no GPU in the build environment): multi-GPU DDP throughput
 and bf16 numerics. The DDP path is standard `torchrun`, but budget time for a
@@ -278,9 +329,12 @@ short 4-GPU shakeout before committing to a long run.
   cross-exchange flow — all of which carry most of the short-horizon signal.
   The ~17 bp 25-minute σ is mostly noise and this feature set may simply not
   be enough to beat the random walk.
-- **`context_from_closes`** (used in live mode when only last-price ticks are
-  available) zero-fills the volume and trade-count channels, which is off the
-  training distribution and costs accuracy. Prefer a full aggTrades feed.
+- **`context_from_closes`** (used in live mode) zero-fills the volume and
+  trade-count channels, which is off the training distribution and costs
+  accuracy. With biquote this is unavoidable — the MT5 feed has no volume.
+- **biquote-only mode is a fallback, not a peer of hybrid.** A 97 % synthetic
+  context is far outside anything the model saw in training; treat its
+  forecasts as indicative only.
 - **`cost_bps=1.0` is a placeholder.** Substitute your real fees and slippage.
 - **No regime handling.** 2020–2026 spans wildly different volatility regimes;
   a single walk-forward split does not test regime robustness.

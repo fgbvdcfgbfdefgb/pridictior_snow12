@@ -198,6 +198,71 @@ def test_feature_gain_length_matches():
     assert len(FEATURE_GAIN) == N_FEATURES
 
 
+def test_feed_grid_uses_zero_order_hold_not_interpolation():
+    """Sparse samples must be HELD, never smoothly interpolated.
+
+    A held price is an honest "no new information". A smooth ramp would
+    manufacture microstructure the market never produced and would leak the
+    next sample's value backwards in time.
+    """
+    from btcpred.live.feeds import _to_grid
+
+    ts = np.array([100, 160], np.int64)
+    close = np.array([50_000.0, 50_600.0])
+    z = np.zeros(2)
+    g, c, v, n, synth = _to_grid(ts, close, z, z, 61, end_ts=160)
+
+    assert g[0] == 100 and g[-1] == 160
+    held = c[(g > 100) & (g < 160)]
+    assert np.all(held == 50_000.0), "grid interpolated between samples"
+    assert c[-1] == 50_600.0
+    assert synth[(g > 100) & (g < 160)].all(), "held seconds not flagged synthetic"
+    assert not synth[0] and not synth[-1]
+
+
+def test_feed_grid_never_leaks_future_samples():
+    from btcpred.live.feeds import _to_grid
+
+    ts = np.array([10, 20, 30], np.int64)
+    close = np.array([1.0, 2.0, 3.0])
+    z = np.zeros(3)
+    g, c, _, _, _ = _to_grid(ts, close, z, z, 21, end_ts=30)
+    # every grid second must carry the most recent value AT OR BEFORE it
+    for gi, ci in zip(g, c):
+        expected = close[ts <= gi][-1] if (ts <= gi).any() else close[0]
+        assert ci == expected, f"t={gi} got {ci}, expected {expected}"
+
+
+def test_hybrid_basis_rebases_onto_the_training_instrument():
+    """biquote BTCUSD (MT5 CFD) must be shifted onto the Binance spot level.
+
+    Without this the model sees a step change at the warm-up/live seam and
+    reads a pure instrument basis as a genuine price move.
+    """
+    from btcpred.live.feeds import HybridFeed
+
+    f = HybridFeed.__new__(HybridFeed)
+    f.basis = -6.5
+    f.alpha = 0.1
+    f.basis_stale = False
+    f.basis_refresh_sec = 1e9       # suppress network re-anchoring
+    f._last_basis_at = 1e18
+    f._last_px = None
+    f._last_ts = None
+
+    class _Stub:
+        def poll(self):
+            return [(1000, 85_000.0, 0.0, 1.0)]
+    f.biquote = _Stub()
+    f.binance = None
+
+    out = f.poll()
+    assert len(out) == 1
+    assert abs(out[0][1] - 85_006.5) < 1e-9, (
+        f"basis not removed: got {out[0][1]}, expected 85006.5"
+    )
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
