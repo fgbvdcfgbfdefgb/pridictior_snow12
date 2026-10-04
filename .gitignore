@@ -9,12 +9,14 @@ wheels/
 *.part
 .DS_Store
 
-# Dataset binaries never go in git: the full store is ~8.7 GB and the raw
-# archives ~25 GB, both far past GitHub's 1 GB free LFS quota -- and `git lfs
-# pull` needs internet, which Snowflake does not have. Code ships by git,
-# data ships by Snowflake stage (btcpred.data.stage). The 3-day smoke sample
-# lives in data/sample/bars_3d.npz as an ordinary 2.4 MB blob.
-data/bars_1s/
-data/raw/
+# The 3-day sample data IS committed, as ordinary git blobs (no LFS):
+#   data/sample/bars_3d.npz        2.4 MB  compressed bar store
+#   data/raw/daily/*.zip          32   MB  the source aggTrades archives
+#   data/bars_1s/*                12   MB  expanded memmap store
+# Each is far under GitHub's 100 MB per-file limit, so no LFS is involved
+# and `git clone` alone works offline.
+#
+# The FULL 2020-today dataset (~8.7 GB store + ~25 GB archives) still cannot
+# live here - that travels by Snowflake stage, see btcpred.data.stage.
 dist/
 artifacts/
