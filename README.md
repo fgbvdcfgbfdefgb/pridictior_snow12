@@ -100,9 +100,15 @@ points. Reported independently of accuracy, and a gate during selection.
 ## Quick start
 
 ```bash
-git clone https://github.com/<you>/pridictior_snow12.git
+# Install git-lfs BEFORE cloning. Without it the dataset arrives as 132-byte
+# pointer stubs and BarStore dies with:
+#   ValueError: mmap length is greater than file size
+# (already cloned? just run `git lfs install && git lfs pull` to recover)
+git lfs install
+
+git clone https://github.com/fgbvdcfgbfdefgb/pridictior_snow12.git
 cd pridictior_snow12
-git lfs install && git lfs pull          # dataset + checkpoints
+git lfs pull                             # 1s bar store + raw archives
 
 pip install -r requirements.txt
 export PYTHONPATH=src
