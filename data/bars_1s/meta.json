@@ -1,0 +1,24 @@
+{
+  "symbol": "BTCUSDT",
+  "start_ts": 1790812800,
+  "n_seconds": 259198,
+  "price_scale": 100,
+  "price_channels": [
+    "open",
+    "high",
+    "low",
+    "close"
+  ],
+  "flow_channels": [
+    "volume",
+    "n_trades",
+    "taker_buy_volume",
+    "vwap"
+  ],
+  "empty_seconds": 29422,
+  "source_archives": [
+    "BTCUSDT-aggTrades-2026-10-01.zip",
+    "BTCUSDT-aggTrades-2026-10-02.zip",
+    "BTCUSDT-aggTrades-2026-10-03.zip"
+  ]
+}

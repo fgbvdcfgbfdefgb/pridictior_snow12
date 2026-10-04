@@ -1,0 +1,11 @@
+# Git LFS: the 1-second bar store and raw archives are far past GitHub's
+# 100 MB per-file hard limit, so they must not enter the normal object store.
+data/bars_1s/*.i64   filter=lfs diff=lfs merge=lfs -text
+data/bars_1s/*.f32   filter=lfs diff=lfs merge=lfs -text
+data/raw/**/*.zip    filter=lfs diff=lfs merge=lfs -text
+*.pt                 filter=lfs diff=lfs merge=lfs -text
+artifacts/*.tar.gz   filter=lfs diff=lfs merge=lfs -text
+
+*.py   text eol=lf
+*.json text eol=lf
+*.md   text eol=lf

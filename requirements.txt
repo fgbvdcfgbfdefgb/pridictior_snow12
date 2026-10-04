@@ -1,0 +1,10 @@
+# Core (required). Install torch from the CUDA index appropriate to your driver:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+torch>=2.2
+numpy>=1.26
+pandas>=2.0
+requests>=2.31
+
+# Live notebook only (not needed for Snowflake offline training)
+marimo>=0.9
+plotly>=5.20

@@ -1,0 +1,44 @@
+{
+  "_comment": "Snowflake: 4x A10 23GB, 48 vCPU, 100GB RAM. Launch with torchrun --nproc_per_node=4",
+  "data": {
+    "bars": "data/bars_1s",
+    "lanes": [
+      {"stride": 1,  "steps": 1800},
+      {"stride": 6,  "steps": 1800},
+      {"stride": 24, "steps": 1800}
+    ],
+    "horizon_minutes": 25,
+    "horizon_every_sec": 60,
+    "val_days": 14.0,
+    "test_days": 7.0,
+    "cursor_step": 1
+  },
+  "model": {
+    "analyser": {"d_model": 768, "n_layers": 10, "n_heads": 12, "downsample": 8},
+    "variants": ["xfmr", "tcn", "ssm"],
+    "scale": 1.0
+  },
+  "train": {
+    "out": "checkpoints",
+    "batch_size": 4,
+    "lr_analyser": 1.5e-4,
+    "lr_predictor": 3.0e-4,
+    "wd": 0.01,
+    "grad_clip": 1.0,
+    "warmup_steps": 500,
+    "max_steps": 200000,
+    "max_hours": 24.0,
+    "workers": 8,
+    "amp": true,
+    "grad_checkpoint": false,
+    "seed": 0,
+    "log_every": 20,
+    "ckpt_every": 2000,
+    "loss_weights": {
+      "pinball": 1.0,
+      "consistency": 0.5,
+      "smoothness": 0.05,
+      "target_gain": 1000.0
+    }
+  }
+}
